@@ -1,0 +1,24 @@
+{
+  "name": "Web Template Dev",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "remoteEnv": {
+    "CLOUDFLARE_ACCOUNT_ID": "${localEnv:CLOUDFLARE_ACCOUNT_ID}",
+    "CLOUDFLARE_API_TOKEN": "${localEnv:CLOUDFLARE_API_TOKEN}",
+    "CLOUDFLARE_ZONE_ID": "${localEnv:CLOUDFLARE_ZONE_ID}",
+    "BETTER_AUTH_SECRET": "${localEnv:BETTER_AUTH_SECRET}",
+    "GOOGLE_CLIENT_ID": "${localEnv:GOOGLE_CLIENT_ID}",
+    "GOOGLE_CLIENT_SECRET": "${localEnv:GOOGLE_CLIENT_SECRET}"
+  },
+  "containerEnv": {
+    "STAGE": "localhost"
+  },
+  "onCreateCommand": "pnpm install --force",
+  "postCreateCommand": ".devcontainer/scripts/setup.sh",
+  "postStartCommand": ".devcontainer/scripts/start-tunnel.sh",
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  }
+}

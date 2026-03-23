@@ -10,12 +10,17 @@
     "db:migrate:local": "turbo db:migrate:local",
     "test": "turbo test",
     "test:e2e": "turbo test:e2e",
-    "update:template": "git fetch web-template main && git merge web-template/main"
-
+    "update:template": "git fetch web-template main && git merge web-template/main",
+    "dev:container": "./scripts/dev-container.sh"
   },
   "devDependencies": {
     "turbo": "^2",
     "typescript": "^5.7"
   },
-  "packageManager": "pnpm@9.15.4"
+  "packageManager": "pnpm@9.15.4",
+  "workspaces": [
+    "apps/*",
+    "workers/*",
+    "packages/*"
+  ]
 }
