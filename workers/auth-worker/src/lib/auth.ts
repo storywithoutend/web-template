@@ -6,7 +6,7 @@ import type { Env } from "../env.d.ts";
 
 export function getAuth(env: Env) {
   const db = drizzle(env.AUTH_DB);
-  const isLocal = env.WEB_URL?.includes("localhost");
+  const isSecure = env.WEB_URL?.startsWith("https://") ?? false;
 
   return betterAuth({
     baseURL: env.BETTER_AUTH_URL,
@@ -31,17 +31,17 @@ export function getAuth(env: Env) {
     },
     trustedOrigins: [env.WEB_URL],
     advanced: {
-      defaultCookieAttributes: isLocal
+      defaultCookieAttributes: isSecure
         ? {
-            secure: false,
-            httpOnly: true,
-            sameSite: "lax" as const,
-          }
-        : {
             secure: true,
             httpOnly: true,
             sameSite: "none" as const,
             partitioned: true,
+          }
+        : {
+            secure: false,
+            httpOnly: true,
+            sameSite: "lax" as const,
           },
     },
   });

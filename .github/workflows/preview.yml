@@ -1,0 +1,183 @@
+name: PR Preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  STAGE: preview
+
+jobs:
+  deploy:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Compute URLs
+        id: urls
+        run: |
+          REPO_NAME=$(basename -s .git "$(git remote get-url origin)")
+          BRANCH_HASH=$(printf '%s' "${{ github.head_ref }}" | sha256sum | cut -c1-8)
+          WEB_HOSTNAME="${REPO_NAME}-${BRANCH_HASH}.preview.yolotime.dev"
+          AUTH_HOSTNAME="auth.${REPO_NAME}-${BRANCH_HASH}.preview.yolotime.dev"
+          echo "repo_name=$REPO_NAME" >> "$GITHUB_OUTPUT"
+          echo "branch_hash=$BRANCH_HASH" >> "$GITHUB_OUTPUT"
+          echo "web_hostname=$WEB_HOSTNAME" >> "$GITHUB_OUTPUT"
+          echo "auth_hostname=$AUTH_HOSTNAME" >> "$GITHUB_OUTPUT"
+          echo "web_url=https://$WEB_HOSTNAME" >> "$GITHUB_OUTPUT"
+          echo "auth_url=https://$AUTH_HOSTNAME" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy auth worker
+        run: |
+          pnpm --filter auth-worker exec wrangler deploy \
+            --var WEB_URL:${{ steps.urls.outputs.web_url }} \
+            --var BETTER_AUTH_URL:${{ steps.urls.outputs.auth_url }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Build web app
+        run: pnpm --filter web build
+        env:
+          VITE_AUTH_WORKER_URL: ${{ steps.urls.outputs.auth_url }}
+
+      - name: Deploy web app to Pages
+        run: |
+          pnpm --filter web exec wrangler pages deploy .output/public \
+            --project-name="${{ steps.urls.outputs.repo_name }}-preview"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Create DNS records
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+        run: |
+          CF_API="https://api.cloudflare.com/client/v4"
+
+          create_or_update_cname() {
+            local name="$1"
+            local target="$2"
+
+            local existing
+            existing=$(curl -sf \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "$CF_API/zones/$CLOUDFLARE_ZONE_ID/dns_records?type=CNAME&name=$name" \
+              | jq -r '.result[0].id // empty')
+
+            if [ -n "$existing" ]; then
+              curl -sf -X PUT \
+                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"type\":\"CNAME\",\"name\":\"$name\",\"content\":\"$target\",\"proxied\":true}" \
+                "$CF_API/zones/$CLOUDFLARE_ZONE_ID/dns_records/$existing" > /dev/null
+            else
+              curl -sf -X POST \
+                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"type\":\"CNAME\",\"name\":\"$name\",\"content\":\"$target\",\"proxied\":true}" \
+                "$CF_API/zones/$CLOUDFLARE_ZONE_ID/dns_records" > /dev/null
+            fi
+            echo "DNS: $name -> $target"
+          }
+
+          # Point web hostname to Pages deployment
+          create_or_update_cname \
+            "${{ steps.urls.outputs.web_hostname }}" \
+            "${{ steps.urls.outputs.repo_name }}-preview.pages.dev"
+
+          # Point auth hostname to auth worker
+          create_or_update_cname \
+            "${{ steps.urls.outputs.auth_hostname }}" \
+            "auth-worker.${{ steps.urls.outputs.repo_name }}.workers.dev"
+
+      - name: Comment PR with preview URL
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = `### Preview deployed\n\n` +
+              `- Web: ${{ steps.urls.outputs.web_url }}\n` +
+              `- Auth: ${{ steps.urls.outputs.auth_url }}\n\n` +
+              `_Updated at ${new Date().toISOString()}_`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('### Preview deployed')
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+  cleanup:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute URLs
+        id: urls
+        run: |
+          REPO_NAME=$(basename -s .git "$(git remote get-url origin)")
+          BRANCH_HASH=$(printf '%s' "${{ github.head_ref }}" | sha256sum | cut -c1-8)
+          echo "web_hostname=${REPO_NAME}-${BRANCH_HASH}.preview.yolotime.dev" >> "$GITHUB_OUTPUT"
+          echo "auth_hostname=auth.${REPO_NAME}-${BRANCH_HASH}.preview.yolotime.dev" >> "$GITHUB_OUTPUT"
+
+      - name: Delete DNS records
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+        run: |
+          CF_API="https://api.cloudflare.com/client/v4"
+
+          delete_cname() {
+            local name="$1"
+            local record_id
+            record_id=$(curl -sf \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "$CF_API/zones/$CLOUDFLARE_ZONE_ID/dns_records?type=CNAME&name=$name" \
+              | jq -r '.result[0].id // empty')
+
+            if [ -n "$record_id" ]; then
+              curl -sf -X DELETE \
+                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                "$CF_API/zones/$CLOUDFLARE_ZONE_ID/dns_records/$record_id" > /dev/null
+              echo "Deleted DNS: $name"
+            fi
+          }
+
+          delete_cname "${{ steps.urls.outputs.web_hostname }}"
+          delete_cname "${{ steps.urls.outputs.auth_hostname }}"
